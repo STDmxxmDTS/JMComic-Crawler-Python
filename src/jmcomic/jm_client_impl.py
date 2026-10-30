@@ -1,8 +1,9 @@
 from copy import deepcopy
 from threading import Lock
 
-from .jm_task_context import bind_jm_task_context
+from .bandwidth import DEFAULT_DOWNLOAD_RATE, shared_bandwidth_limiter
 from .jm_client_interface import *
+from .jm_task_context import bind_jm_task_context
 
 
 # 抽象基类，实现了域名管理，发请求，重试机制，log，缓存等功能
@@ -33,6 +34,9 @@ class AbstractJmClient(
         self.CLIENT_CACHE = None
         self._username = None  # help for favorite_folder method
         self._user_id = None  # help for check_in / get_daily method
+        self._download_limiter = shared_bandwidth_limiter(
+            self.get_meta_data("download_rate_limit", DEFAULT_DOWNLOAD_RATE)
+        )
         if domain_retry_strategy:
             domain_retry_strategy(self)
         self.enable_cache()
@@ -51,7 +55,9 @@ class AbstractJmClient(
         return JmcomicText.format_url(api_path, domain)
 
     def get_jm_image(self, img_url) -> JmImageResp:
-        return self.get(img_url, is_image=True, headers=JmModuleConfig.new_html_headers())
+        response = self.get(img_url, is_image=True, headers=JmModuleConfig.new_html_headers())
+        self._download_limiter.consume(len(response.content))
+        return response
 
     def request_with_retry(self,
                            request,
@@ -1343,16 +1349,18 @@ class JmApiClient(AbstractJmClient):
     client_init_cookies_lock = Lock()
 
     def ensure_have_cookies(self):
+        # Cookies belong to the option/client session.  A process-global cache
+        # can silently leak one account into another concurrently configured
+        # option, so only use it as a legacy fallback when this session has no
+        # persisted cookies.
         if self.get_meta_data('cookies'):
             return
 
         with self.client_init_cookies_lock:
             if self.get_meta_data('cookies'):
                 return
-
             self['cookies'] = self.get_cookies()
 
-    @field_cache("APP_COOKIES", obj=JmModuleConfig)
     def get_cookies(self):
         resp = self.setting()
         cookies = dict(resp.resp.cookies)

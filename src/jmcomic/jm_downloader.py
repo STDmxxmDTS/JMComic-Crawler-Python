@@ -13,6 +13,7 @@ from .jm_task_context import (
     JTC,
     jm_task_context,
 )
+from .jm_toolkit import JmImageTool
 
 
 def record_download_duration(context_key: str, clock=None):
@@ -587,7 +588,7 @@ class JmDownloader(BaseDownloader):
     def download_by_image_detail(self, image: JmImageDetail):
         img_save_path = self.option.decide_image_filepath(image)
         image.save_path = img_save_path
-        image.exists = file_exists(img_save_path)
+        image.exists = file_exists(img_save_path) and JmImageTool.is_valid_image_file(img_save_path)
         image.cache = self.option.decide_download_cache(image)
 
         self.before_image(image, img_save_path)

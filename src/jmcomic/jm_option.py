@@ -471,6 +471,13 @@ class JmOption:
 
         meta_data: dict = postman_conf['meta_data']  # 元数据
 
+        configured_mib = self.download.get("bandwidth_mib", 3)
+        try:
+            bandwidth_mib = max(0, int(configured_mib))
+        except (TypeError, ValueError):
+            bandwidth_mib = 3
+        meta_data.setdefault("download_rate_limit", bandwidth_mib * 1024 * 1024)
+
         retry_times: int = self.client.retry_times  # 重试次数
 
         cache: str = cache if cache is not None else self.client.cache  # 启用缓存
@@ -517,12 +524,18 @@ class JmOption:
         if clazz == AbstractJmClient or not issubclass(clazz, AbstractJmClient):
             raise NotImplementedError(clazz)
 
-        client: JmcomicClient = clazz(
-            postman=postman,
-            domain_list=decide_domain_list(),
-            retry_times=retry_times,
-            domain_retry_strategy=domain_retry_strategy,
-        )
+        try:
+            client: JmcomicClient = clazz(
+                postman=postman,
+                domain_list=decide_domain_list(),
+                retry_times=retry_times,
+                domain_retry_strategy=domain_retry_strategy,
+            )
+        finally:
+            # The limiter consumes this value during client construction. It
+            # must not remain in Postman metadata, which commonx forwards to
+            # Session.request() as HTTP keyword arguments.
+            meta_data.pop("download_rate_limit", None)
 
         # enable cache
         CacheRegistry.enable_client_cache_on_condition(self, client, cache)

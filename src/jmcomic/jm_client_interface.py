@@ -127,7 +127,8 @@ class JmApiResp(JmJsonResp):
 
     @property
     def is_success(self) -> bool:
-        return super().is_success and self.json()['code'] == 200
+        payload = self.json()
+        return super().is_success and payload.get('code') == 200
 
     @property
     @field_cache()
@@ -139,6 +140,11 @@ class JmApiResp(JmJsonResp):
         return self.json()['data']
 
     def require_have_data(self):
+        payload = self.json()
+        if 'code' not in payload:
+            ExceptionTool.raises_resp('响应缺少 code 字段', self, ResponseUnexpectedException)
+        if 'data' not in payload:
+            ExceptionTool.raises_resp('响应缺少 data 字段', self, ResponseUnexpectedException)
         data = self.encoded_data
         if data is None:
             ExceptionTool.raises_resp(f'响应数据为空: {self.text}', self)

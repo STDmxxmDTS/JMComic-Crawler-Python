@@ -231,7 +231,7 @@ class JmAsyncDownloader(BaseDownloader):
         """
         img_save_path = self.option.decide_image_filepath(image)
         image.save_path = img_save_path
-        image.exists = os.path.exists(img_save_path)
+        image.exists = os.path.exists(img_save_path) and JmImageTool.is_valid_image_file(img_save_path)
         image.cache = self.option.decide_download_cache(image)
 
         await self.before_image(image, img_save_path)
@@ -306,8 +306,7 @@ class JmAsyncDownloader(BaseDownloader):
         if need_convert:
             JmImageTool.save_image(JmImageTool.open_image(image_bytes), save_path)
         else:
-            with open(save_path, 'wb') as f:
-                f.write(image_bytes)
+            JmImageTool.save_bytes(image_bytes, save_path)
 
     # ======================================================================
     # 生命周期

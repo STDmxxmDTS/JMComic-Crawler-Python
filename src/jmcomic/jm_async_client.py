@@ -7,26 +7,40 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Sequence
 from copy import deepcopy
-from typing import Sequence
 from urllib.parse import urlencode
+
 from curl_cffi.requests import AsyncSession
 
+from .bandwidth import shared_bandwidth_limiter
 from .jm_client_interface import (
-    JmApiResp, JmImageResp, JmAlbumCommentResp, JmDailyCheckinResp,
     AsyncJmcomicClient,
+    JmAlbumCommentResp,
+    JmApiResp,
+    JmDailyCheckinResp,
+    JmImageResp,
 )
+from .jm_config import JmMagicConstants, JmModuleConfig, jm_log, time_stamp
 from .jm_entity import (
-    JmAlbumDetail, JmPhotoDetail, JmSearchPage, JmCategoryPage,
-    JmFavoritePage, DetailType, JmAlbumCommentPage
-)
-from .jm_config import JmModuleConfig, JmMagicConstants, time_stamp, jm_log
-from .jm_toolkit import (
-    JmcomicText, JmCryptoTool, JmApiAdaptTool, JmPageTool,
-    ExceptionTool, PatternTool,
+    DetailType,
+    JmAlbumCommentPage,
+    JmAlbumDetail,
+    JmCategoryPage,
+    JmFavoritePage,
+    JmPhotoDetail,
+    JmSearchPage,
 )
 from .jm_exception import RequestRetryAllFailException
 from .jm_option import JmOption
+from .jm_toolkit import (
+    ExceptionTool,
+    JmApiAdaptTool,
+    JmcomicText,
+    JmCryptoTool,
+    JmPageTool,
+    PatternTool,
+)
 
 
 class AsyncJmApiClient(AsyncJmcomicClient):
@@ -83,6 +97,12 @@ class AsyncJmApiClient(AsyncJmcomicClient):
         self._cache: dict | None = None
         self._username: str | None = None
         self._user_id: str | None = None
+        configured_mib = option.download.get("bandwidth_mib", 3)
+        try:
+            bandwidth_mib = max(0, int(configured_mib))
+        except (TypeError, ValueError):
+            bandwidth_mib = 3
+        self._download_limiter = shared_bandwidth_limiter(bandwidth_mib * 1024 * 1024)
 
         # 接收并保存额外的会话级元数据参数
         self._meta_kwargs = kwargs
@@ -507,17 +527,19 @@ class AsyncJmApiClient(AsyncJmcomicClient):
         # noinspection PyUnresolvedReferences
         if self._session and self._session.cookies:
             return
-        # 复用全局缓存
-        if JmModuleConfig.APP_COOKIES is not None:
+        # Prefer cookies persisted on this option.  Process-global cookies
+        # would leak credentials across concurrently configured sessions.
+        metadata = self.option.client.postman.meta_data.src_dict
+        option_cookies = metadata.get('cookies') or {}
+        if option_cookies:
             await self._ensure_session()
-            # noinspection PyUnresolvedReferences
-            self._session.cookies.update(JmModuleConfig.APP_COOKIES)
+            self._session.cookies.update(option_cookies)
             return
         resp = await self.setting()
         cookies = dict(resp.resp.cookies)
-        JmModuleConfig.APP_COOKIES = cookies
         # noinspection PyUnresolvedReferences,PyTypeChecker
         self._session.cookies.update(cookies)
+        self.option.update_cookies(cookies)
 
     async def setting(self) -> JmApiResp:
         """获取服务端的环境配置（包含应用版本等参数）"""
@@ -807,6 +829,7 @@ class AsyncJmApiClient(AsyncJmcomicClient):
                 img_resp = JmImageResp(resp)
                 if resp.status_code != 200 or len(resp.content) == 0:
                     img_resp.require_success()  # 会抛出描述性异常
+                await self._download_limiter.aconsume(len(img_resp.content))
                 return img_resp
             except Exception as e:
                 last_error = e

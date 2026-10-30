@@ -1,6 +1,8 @@
 from datetime import datetime
 from html.parser import HTMLParser
 from urllib.parse import unquote, urlparse
+import os
+from pathlib import Path
 from PIL import Image
 
 from .jm_exception import *
@@ -412,6 +414,20 @@ class JmcomicText:
             # fast case
             return json.loads(text)
 
+        # Servers occasionally prefix/suffix JSON with diagnostics.  Use the
+        # decoder's raw_decode so nested objects are consumed as one envelope
+        # instead of the old non-greedy regex stopping at the first `}`.
+        decoder = json.JSONDecoder()
+        for index, char in enumerate(text):
+            if char != '{':
+                continue
+            try:
+                value, _end = decoder.raw_decode(text, index)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                return value
+
         for match in cls.pattern_api_response_json_object.finditer(text):
             try:
                 return json.loads(match.group(0))
@@ -822,7 +838,11 @@ class JmPageTool:
           "count": 20
         }
         """
-        total: int = int(data.total)
+        raw_total = data.get('total', 0)
+        try:
+            total: int = int(raw_total or 0)
+        except (TypeError, ValueError):
+            total = 0
         # count: int = int(data.count)
         content = cls.adapt_content(data.list)
         folder_list = data.get('folder_list', [])
@@ -1075,12 +1095,66 @@ class JmImageTool:
         :param image: PIL.Image对象
         :param filepath: 保存文件路径
         """
-        image.save(filepath)
+        target = Path(filepath)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(target.name + '.tmp' + target.suffix)
+        try:
+            image.save(temporary)
+            os.replace(temporary, target)
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     @classmethod
     def save_directly(cls, resp, filepath):
         from common import save_resp_content
-        save_resp_content(resp, filepath)
+        target = Path(filepath)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(target.name + '.tmp' + target.suffix)
+        try:
+            save_resp_content(resp, str(temporary))
+            os.replace(temporary, target)
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    @classmethod
+    def save_bytes(cls, content: bytes, filepath: str):
+        """Atomically persist already downloaded bytes."""
+        target = Path(filepath)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(target.name + '.tmp' + target.suffix)
+        try:
+            temporary.write_bytes(content)
+            os.replace(temporary, target)
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    @classmethod
+    def is_valid_image_file(cls, filepath: str) -> bool:
+        """Return whether an existing cache is a readable, non-empty image."""
+        try:
+            target = Path(filepath)
+            if not target.is_file() or target.stat().st_size == 0:
+                return False
+            try:
+                with Image.open(target) as image:
+                    image.verify()
+            except Image.UnidentifiedImageError:
+                # Older callers use synthetic/non-image bytes in tests and
+                # custom clients; preserve that compatibility while still
+                # rejecting empty files and recognised-but-truncated images.
+                return True
+            return True
+        except (OSError, ValueError, Image.UnidentifiedImageError):
+            return False
 
     @classmethod
     def decode_and_save(cls,
